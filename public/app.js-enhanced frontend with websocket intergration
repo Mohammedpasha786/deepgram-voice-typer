@@ -1,0 +1,120 @@
+class DeepVoiceTranscriber {
+    constructor() {
+        this.socket = null;
+        this.mediaRecorder = null;
+        this.audioContext = null;
+        this.isRecording = false;
+        this.isConnected = false;
+        this.interimTranscript = '';
+        this.finalTranscript = '';
+        
+        // Audio processing
+        this.processor = null;
+        this.audioStream = null;
+        
+        // DOM elements
+        this.recordBtn = document.getElementById('recordBtn');
+        this.statusDot = document.getElementById('statusDot');
+        this.statusText = document.getElementById('statusText');
+        this.transcriptArea = document.getElementById('transcriptArea');
+        this.clearBtn = document.getElementById('clearBtn');
+        this.copyBtn = document.getElementById('copyBtn');
+        this.wordCount = document.getElementById('wordCount');
+        this.connectionStatus = document.getElementById('connectionStatus');
+        this.errorMessage = document.getElementById('errorMessage');
+        this.typingIndicator = document.getElementById('typingIndicator');
+        
+        this.initializeEventListeners();
+        this.connectWebSocket();
+    }
+
+    initializeEventListeners() {
+        this.recordBtn.addEventListener('click', () => {
+            if (this.isRecording) {
+                this.stopRecording();
+            } else {
+                this.startRecording();
+            }
+        });
+
+        this.clearBtn.addEventListener('click', () => {
+            this.transcriptArea.value = '';
+            this.finalTranscript = '';
+            this.interimTranscript = '';
+            this.updateWordCount();
+        });
+
+        this.copyBtn.addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(this.transcriptArea.value);
+                this.copyBtn.textContent = 'Copied!';
+                this.copyBtn.style.background = 'linear-gradient(135deg, #10b981, #059669)';
+                setTimeout(() => {
+                    this.copyBtn.textContent = 'Copy to Clipboard';
+                    this.copyBtn.style.background = 'linear-gradient(135deg, #667eea, #764ba2)';
+                }, 2000);
+            } catch (err) {
+                this.showError('Failed to copy to clipboard');
+            }
+        });
+
+        // Handle keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.key === ' ' && e.ctrlKey) {
+                e.preventDefault();
+                if (this.isRecording) {
+                    this.stopRecording();
+                } else {
+                    this.startRecording();
+                }
+            }
+        });
+    }
+
+    connectWebSocket() {
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}`;
+        
+        try {
+            this.socket = new WebSocket(wsUrl);
+            
+            this.socket.onopen = () => {
+                console.log('WebSocket connected');
+                this.updateConnectionStatus(true);
+            };
+            
+            this.socket.onmessage = (event) => {
+                this.handleWebSocketMessage(JSON.parse(event.data));
+            };
+            
+            this.socket.onclose = () => {
+                console.log('WebSocket disconnected');
+                this.updateConnectionStatus(false);
+                // Attempt to reconnect after 3 seconds
+                setTimeout(() => {
+                    if (!this.isConnected) {
+                        this.connectWebSocket();
+                    }
+                }, 3000);
+            };
+            
+            this.socket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                this.showError('Connection error occurred');
+            };
+            
+        } catch (error) {
+            console.error('Failed to connect WebSocket:', error);
+            this.showError('Failed to connect to transcription service');
+        }
+    }
+
+    handleWebSocketMessage(data) {
+        switch (data.type) {
+            case 'status':
+                if (data.status === 'connected') {
+                    this.showMessage('Connected to Deepgram');
+                } else if (data.status === 'ready') {
+                    this.updateConnectionStatus(true);
+                }
+                break;
