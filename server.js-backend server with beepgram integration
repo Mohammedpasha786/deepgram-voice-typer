@@ -1,0 +1,218 @@
+const express = require('express');
+const WebSocket = require('ws');
+const { createServer } = require('http');
+const path = require('path');
+require('dotenv').config();
+
+// Deepgram SDK
+const { Deepgram } = require('@deepgram/sdk');
+
+const app = express();
+const server = createServer(app);
+const wss = new WebSocket.Server({ server });
+
+// Initialize Deepgram
+const deepgram = new Deepgram(process.env.DEEPGRAM_API_KEY);
+
+// Serve static files
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+// WebSocket connection handling
+wss.on('connection', (ws) => {
+    console.log('Client connected');
+    
+    let deepgramLive = null;
+    let isConnected = false;
+
+    // Initialize Deepgram connection
+    const initializeDeepgram = () => {
+        try {
+            deepgramLive = deepgram.transcription.live({
+                language: 'en-US',
+                punctuate: true,
+                smart_format: true,
+                model: 'nova-2',
+                version: 'latest',
+                encoding: 'linear16',
+                sample_rate: 16000,
+                channels: 1,
+                multichannel: false,
+                alternatives: 3,
+                numerals: true,
+                search: [],
+                replace: [],
+                keywords: [],
+                interim_results: true,
+                endpointing: 300,
+                utterance_end_ms: 1000,
+                vad_events: true,
+                filler_words: false,
+                profanity_filter: true,
+                redact: [],
+                diarize: false,
+                ner: false,
+                sentiment: false,
+                summarize: false,
+                detect_language: false,
+                paragraphs: false,
+            });
+
+            // Handle Deepgram events
+            deepgramLive.addListener('open', () => {
+                console.log('Deepgram connection opened');
+                isConnected = true;
+                ws.send(JSON.stringify({
+                    type: 'status',
+                    status: 'connected',
+                    message: 'Connected to Deepgram'
+                }));
+            });
+
+            deepgramLive.addListener('close', () => {
+                console.log('Deepgram connection closed');
+                isConnected = false;
+                ws.send(JSON.stringify({
+                    type: 'status',
+                    status: 'disconnected',
+                    message: 'Disconnected from Deepgram'
+                }));
+            });
+
+            deepgramLive.addListener('error', (error) => {
+                console.error('Deepgram error:', error);
+                ws.send(JSON.stringify({
+                    type: 'error',
+                    message: 'Deepgram connection error'
+                }));
+            });
+
+            deepgramLive.addListener('transcriptReceived', (data) => {
+                const transcript = data.channel?.alternatives?.[0];
+                if (transcript) {
+                    ws.send(JSON.stringify({
+                        type: 'transcript',
+                        text: transcript.transcript,
+                        confidence: transcript.confidence,
+                        is_final: data.is_final,
+                        speech_final: data.speech_final
+                    }));
+                }
+            });
+
+            deepgramLive.addListener('utteranceEnd', (data) => {
+                ws.send(JSON.stringify({
+                    type: 'utterance_end',
+                    data: data
+                }));
+            });
+
+        } catch (error) {
+            console.error('Failed to initialize Deepgram:', error);
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Failed to initialize transcription service'
+            }));
+        }
+    };
+
+    // Handle WebSocket messages from client
+    ws.on('message', (message) => {
+        try {
+            const data = JSON.parse(message);
+            
+            switch (data.type) {
+                case 'start':
+                    console.log('Starting transcription...');
+                    initializeDeepgram();
+                    break;
+                    
+                case 'audio':
+                    if (deepgramLive && isConnected) {
+                        // Convert base64 audio to buffer and send to Deepgram
+                        const audioBuffer = Buffer.from(data.audio, 'base64');
+                        deepgramLive.send(audioBuffer);
+                    }
+                    break;
+                    
+                case 'stop':
+                    console.log('Stopping transcription...');
+                    if (deepgramLive) {
+                        deepgramLive.finish();
+                        deepgramLive = null;
+                    }
+                    break;
+                    
+                default:
+                    console.log('Unknown message type:', data.type);
+            }
+        } catch (error) {
+            console.error('Error processing message:', error);
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'Error processing message'
+            }));
+        }
+    });
+
+    // Handle WebSocket connection close
+    ws.on('close', () => {
+        console.log('Client disconnected');
+        if (deepgramLive) {
+            deepgramLive.finish();
+            deepgramLive = null;
+        }
+    });
+
+    // Handle WebSocket errors
+    ws.on('error', (error) => {
+        console.error('WebSocket error:', error);
+    });
+
+    // Send initial connection status
+    ws.send(JSON.stringify({
+        type: 'status',
+        status: 'ready',
+        message: 'WebSocket connected, ready to start transcription'
+    }));
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+    console.error('Express error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📝 Open http://localhost:${PORT} to start transcribing`);
+    
+    // Check if Deepgram API key is configured
+    if (!process.env.DEEPGRAM_API_KEY) {
+        console.warn('⚠️  DEEPGRAM_API_KEY not found in environment variables');
+        console.warn('   Please add your Deepgram API key to .env file');
+    }
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down gracefully...');
+    server.close(() => {
+        console.log('✅ Server closed');
+        process.exit(0);
+    });
+});
+
+process.on('SIGTERM', () => {
+    console.log('🛑 SIGTERM received, shutting down gracefully...');
+    server.close(() => {
+        console.log('✅ Server closed');
+        process.exit(0);
+    });
+});
